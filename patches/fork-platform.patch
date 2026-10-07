@@ -1,0 +1,11 @@
+@@ -900,6 +900,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     #[cfg(all(target_os = "linux", feature = "wayland"))]
+     fn set_exclusive_edge(&self, _edge: layer_shell::Anchor) {}
+     fn set_input_region(&self, _region: Option<&[Bounds<Pixels>]>) {}
++    /// Sets window-local bounds where the platform's primary GPUI view lets
++    /// pointer input continue to lower native sibling views.
++    #[cfg(target_os = "macos")]
++    fn set_native_input_passthrough_bounds(&self, _bounds: &[Bounds<Pixels>]) {}
+     fn window_decorations(&self) -> Decorations {
+         Decorations::Server
+     }

@@ -1168,6 +1168,7 @@ pub struct Window {
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
+    platform_teardown_callbacks: Vec<Box<dyn FnOnce()>>,
     display_id: Option<DisplayId>,
     is_resizable: bool,
     is_minimizable: bool,
@@ -1252,6 +1253,14 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        for callback in self.platform_teardown_callbacks.drain(..) {
+            callback();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2067,6 +2076,7 @@ impl Window {
             invalidator,
             removed: false,
             platform_window,
+            platform_teardown_callbacks: Vec::new(),
             display_id,
             is_resizable,
             is_minimizable,
@@ -2457,6 +2467,27 @@ impl Window {
     /// - `None` resets the region to the default, so the whole window receives input again.
     pub fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
         self.platform_window.set_input_region(region);
+    }
+
+    /// Sets the window-local bounds where GPUI's native view passes pointer
+    /// hit testing through to lower native sibling views.
+    ///
+    /// The bounds use GPUI's top-left logical coordinate system. Passing an
+    /// empty slice restores GPUI pointer handling across the whole native view.
+    #[cfg(target_os = "macos")]
+    pub fn set_native_input_passthrough_bounds(&self, bounds: &[Bounds<Pixels>]) {
+        self.platform_window
+            .set_native_input_passthrough_bounds(bounds);
+    }
+
+    /// Registers work that must finish before this window's platform window
+    /// and native view begin teardown.
+    ///
+    /// Callbacks run exactly once when the GPUI [`Window`] is dropped. They
+    /// cannot borrow GPUI state; callers should capture only the native
+    /// resources whose lifetime must end before the platform window.
+    pub fn on_platform_teardown(&mut self, callback: impl FnOnce() + 'static) {
+        self.platform_teardown_callbacks.push(Box::new(callback));
     }
 
     /// Return the `WindowBounds` to indicate that how a window should be opened
@@ -8032,6 +8063,24 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+
+    #[gpui::test]
+    fn platform_teardown_callback_runs_when_window_is_removed(cx: &mut TestAppContext) {
+        let did_teardown = Rc::new(Cell::new(false));
+        let window = cx.add_window({
+            let did_teardown = did_teardown.clone();
+            move |window, _| {
+                window.on_platform_teardown(move || did_teardown.set(true));
+                EmptyView
+            }
+        });
+
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+
+        assert!(did_teardown.get());
     }
 
     struct OpensWindowOnPaint {

@@ -131,6 +131,10 @@ unsafe fn build_classes() {
             let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
             decl.add_method(sel!(dealloc), dealloc_view as extern "C" fn(&Object, Sel));
+            decl.add_method(
+                sel!(hitTest:),
+                hit_test as extern "C" fn(&Object, Sel, NSPoint) -> id,
+            );
 
             decl.add_method(
                 sel!(performKeyEquivalent:),
@@ -677,6 +681,7 @@ struct MacWindowState {
     moved_callback: Option<Box<dyn FnMut()>>,
     should_close_callback: Option<Box<dyn FnMut() -> bool>>,
     close_callback: Option<Box<dyn FnOnce()>>,
+    native_input_passthrough_bounds: Vec<Bounds<Pixels>>,
     appearance_changed_callback: Option<Box<dyn FnMut()>>,
     input_handler: Option<PlatformInputHandler>,
     last_key_equivalent: Option<KeyDownEvent>,
@@ -1114,6 +1119,7 @@ impl MacWindow {
                 moved_callback: None,
                 should_close_callback: None,
                 close_callback: None,
+                native_input_passthrough_bounds: Vec::new(),
                 appearance_changed_callback: None,
                 input_handler: None,
                 last_key_equivalent: None,
@@ -2047,6 +2053,20 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().close_callback = Some(callback);
     }
 
+    fn set_native_input_passthrough_bounds(&self, bounds: &[Bounds<Pixels>]) {
+        let mut state = self.0.lock();
+        state.native_input_passthrough_bounds.clear();
+        state
+            .native_input_passthrough_bounds
+            .extend_from_slice(bounds);
+        unsafe {
+            let _: () = msg_send![
+                state.native_window,
+                invalidateCursorRectsForView: state.native_view.as_ptr()
+            ];
+        }
+    }
+
     fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
     }
 
@@ -2505,6 +2525,31 @@ fn add_mouse_tracking_area(native_view: &Objc2NSView) {
         )
     };
     native_view.addTrackingArea(&tracking_area);
+}
+
+fn point_is_in_native_input_passthrough_bounds(
+    position: Point<Pixels>,
+    bounds: &[Bounds<Pixels>],
+) -> bool {
+    bounds.iter().any(|bounds| bounds.contains(&position))
+}
+
+extern "C" fn hit_test(this: &Object, _: Sel, native_position: NSPoint) -> id {
+    let window_state = unsafe { get_window_state(this) };
+    let state = window_state.lock();
+    let view_bounds = unsafe { NSView::bounds(this as *const Object as id) };
+    let position = convert_mouse_position(native_position, px(view_bounds.size.height as f32));
+    let passes_through = point_is_in_native_input_passthrough_bounds(
+        position,
+        &state.native_input_passthrough_bounds,
+    );
+    drop(state);
+
+    if passes_through {
+        nil
+    } else {
+        unsafe { msg_send![super(this, class!(NSView)), hitTest: native_position] }
+    }
 }
 
 extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
@@ -3929,5 +3974,27 @@ mod tests {
     #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {
         assert_eq!(display_id_for_screen(nil), None);
+    }
+
+    #[test]
+    fn native_input_passthrough_bounds_use_gpui_top_left_coordinates() {
+        let bounds = Bounds::new(point(px(100.), px(120.)), size(px(300.), px(240.)));
+
+        assert!(point_is_in_native_input_passthrough_bounds(
+            point(px(100.), px(120.)),
+            &[bounds]
+        ));
+        assert!(point_is_in_native_input_passthrough_bounds(
+            point(px(399.), px(359.)),
+            &[bounds]
+        ));
+        assert!(!point_is_in_native_input_passthrough_bounds(
+            point(px(99.), px(120.)),
+            &[bounds]
+        ));
+        assert!(!point_is_in_native_input_passthrough_bounds(
+            point(px(400.), px(360.)),
+            &[bounds]
+        ));
     }
 }
